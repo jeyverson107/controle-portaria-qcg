@@ -2,22 +2,39 @@ import streamlit as st
 from supabase import create_client, Client
 from datetime import datetime
 import pytz
+import pandas as pd
 
-# Configuração do Fuso Horário do Brasil
+# -------------------------------------------------------------
+# CONFIGURAÇÃO DE FUSO HORÁRIO E DATA/HORA
+# -------------------------------------------------------------
 FUSO_BR = pytz.timezone('America/Recife')
 
 def obter_data_hora_atual():
-    """Retorna a data e hora formatada no fuso de Brasília/Recife (DD/MM/YYYY HH:MM:SS)"""
+    """Retorna data e hora formatadas no fuso de Brasília/Recife (DD/MM/YYYY HH:MM:SS)"""
     return datetime.now(FUSO_BR).strftime('%d/%m/%Y %H:%M:%S')
 
-# Configuração da página Streamlit
+def obter_data_atual():
+    """Retorna a data atual no formato YYYY-MM-DD para filtros"""
+    return datetime.now(FUSO_BR).strftime('%Y-%m-%d')
+
+def formatar_placa(placa_raw: str) -> str:
+    """Converte para maiúsculas e remove hifens/espaços (ex: abc-1234 vira ABC1234)"""
+    if not placa_raw:
+        return ""
+    return placa_raw.strip().upper().replace("-", "").replace(" ", "")
+
+# -------------------------------------------------------------
+# CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# -------------------------------------------------------------
 st.set_page_config(
     page_title="Controle de Acesso - Portaria QCG",
     page_icon="🛡️",
     layout="wide"
 )
 
-# Conexão com o Supabase
+# -------------------------------------------------------------
+# CONEXÃO SUPABASE
+# -------------------------------------------------------------
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["SUPABASE_URL"]
@@ -26,7 +43,9 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# Autenticação de Usuários Simples
+# -------------------------------------------------------------
+# AUTENTICAÇÃO E LOGIN
+# -------------------------------------------------------------
 USUARIOS = {
     "sentinela": "qcg2026",
     "admin": "coronel2026"
@@ -39,132 +58,307 @@ if not st.session_state.logged_in:
     st.title("🛡️ Controle de Acesso - Portaria QCG")
     st.subheader("Acesso ao Sistema")
     
-    usuario_input = st.text_input("Usuário")
-    senha_input = st.text_input("Senha", type="password")
-    
-    if st.button("Entrar"):
-        if usuario_input in USUARIOS and USUARIOS[usuario_input] == senha_input:
-            st.session_state.logged_in = True
-            st.session_state.usuario = usuario_input
-            st.rerun()
-        else:
-            st.error("Usuário ou senha incorretos.")
+    col_login, _ = st.columns([1, 2])
+    with col_login:
+        usuario_input = st.text_input("Usuário")
+        senha_input = st.text_input("Senha", type="password")
+        
+        if st.button("Entrar", type="primary"):
+            if usuario_input in USUARIOS and USUARIOS[usuario_input] == senha_input:
+                st.session_state.logged_in = True
+                st.session_state.usuario = usuario_input
+                st.rerun()
+            else:
+                st.error("Usuário ou senha incorretos.")
     st.stop()
 
-# --- TELA PRINCIPAL DO SISTEMA ---
-st.title("🛡️ Controle de Acesso - Portaria QCG")
-st.caption(f"Usuário ativo: **{st.session_state.usuario}** | {obter_data_hora_atual()}")
+# -------------------------------------------------------------
+# OPÇÕES DE POSTOS / GRADUAÇÕES
+# -------------------------------------------------------------
+POSTOS_GRADUACOES = [
+    "OFICIAIS SUPERIORES",
+    "OFICIAIS INTERMEDIÁRIOS/SUBALTERNOS",
+    "PRAÇAS",
+    "VISITANTE/ADVOGADO",
+    "SERVIDORES CIVIS",
+    "PRESTADOR DE SERVIÇOS",
+    "OUTROS"
+]
 
-# Abas de Funcionalidades
-aba1, aba2, aba3 = st.tabs(["🚗 Registro de Movimentação", "📋 Cadastro de Veículos/Pessoas", "📊 Histórico Geral"])
+# State para redirecionamento com preenchimento automático da placa
+if "placa_redirecionada" not in st.session_state:
+    st.session_state.placa_redirecionada = ""
+
+# Cabecario Principal
+st.title("🛡️ Controle de Acesso - Portaria QCG")
+st.caption(f"Usuário ativo: **{st.session_state.usuario}** | Data/Hora: {obter_data_hora_atual()}")
+
+# Abas Principais
+aba1, aba2, aba3, aba4 = st.tabs([
+    "📋 Aba 1: Cadastro de Veículos",
+    "🚗 Aba 2: Registro de Entrada",
+    "🚘 Aba 3: Acompanhamento (Pátio Interno)",
+    "📊 Aba 4: Histórico / Relatórios"
+])
 
 # -------------------------------------------------------------
-# ABA 1: REGISTRO DE MOVIMENTAÇÃO (ENTRADA / SAÍDA)
+# ABA 1: CADASTRO DE VEÍCULOS
 # -------------------------------------------------------------
 with aba1:
-    st.header("Entrada e Saída de Veículos")
-    placa_busca = st.text_input("Digite a Placa do Veículo:").strip().upper()
+    st.header("📋 Cadastro de Veículos e Condutores")
     
-    if placa_busca:
-        # Busca no cadastro prévio
-        res_cad = supabase.table("cadastros").select("*").eq("placa", placa_busca).execute()
-        
-        if res_cad.data:
-            dados = res_cad.data[0]
-            st.success("Veículo Encontrado no Cadastro!")
-            st.write(f"**Placa:** {dados.get('placa')}")
-            st.write(f"**Posto/Cargo:** {dados.get('posto_cargo', 'N/I')}")
-            st.write(f"**Nome:** {dados.get('nome', 'N/I')}")
-            st.write(f"**Obs:** {dados.get('obs', 'Sem observações')}")
+    placa_inicial = st.session_state.placa_redirecionada
+    if placa_inicial:
+        st.info(f"Preenchendo cadastro para a placa direcionada: **{placa_inicial}**")
+        st.session_state.placa_redirecionada = "" # Limpa após usar
+
+    with st.form("form_cadastro_veiculo"):
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            placa_input = st.text_input("Placa do Veículo", value=placa_inicial, help="Sera formatada automaticamente (ex: ABC1234)").strip()
+            posto_input = st.selectbox("Posto / Cargo / Graduação", POSTOS_GRADUACOES)
+        with c2:
+            nome_input = st.text_input("Nome Completo do Condutor")
+            obs_input = st.text_area("Observações (Setor, Telefone, Autorização, etc.)", height=68)
             
-            # Verificar se há entrada em aberto sem saída
-            res_mov = supabase.table("movimentacoes")\
-                .select("*")\
-                .eq("placa", placa_busca)\
-                .eq("status", "Em Trânsito")\
-                .execute()
-                
-            if res_mov.data:
-                mov_aberta = res_mov.data[0]
-                st.warning(f"Veículo com entrada em aberto desde: {mov_aberta.get('hora_entrada')}")
-                if st.button("🔴 Confirmar Saída do Veículo", type="primary"):
-                    hora_saida = obter_data_hora_atual()
-                    supabase.table("movimentacoes").update({
-                        "hora_saida": hora_saida,
-                        "status": "Concluído"
-                    }).eq("id", mov_aberta["id"]).execute()
-                    st.success("Saída registrada com sucesso!")
-                    st.rerun()
+        c_btn1, c_btn2 = st.columns([1, 1])
+        with c_btn1:
+            btn_salvar = st.form_submit_button("💾 Salvar Cadastro", type="primary")
+        with c_btn2:
+            btn_salvar_e_entrar = st.form_submit_button("🟢 Salvar e Registrar Entrada Imediata")
+
+        if btn_salvar or btn_salvar_e_entrar:
+            placa_fmt = formatar_placa(placa_input)
+            if not placa_fmt or not nome_input:
+                st.error("Por favor, preencha pelo menos a Placa e o Nome Completo.")
             else:
-                if st.button("🟢 Confirmar Entrada do Veículo", type="primary"):
-                    hora_entrada = obter_data_hora_atual()
-                    supabase.table("movimentacoes").insert({
-                        "placa": placa_busca,
-                        "nome": dados.get("nome"),
-                        "posto_cargo": dados.get("posto_cargo"),
-                        "hora_entrada": hora_entrada,
-                        "status": "Em Trânsito"
+                # Verifica se a placa já existe
+                existe = supabase.table("cadastros").select("id").eq("placa", placa_fmt).execute()
+                if existe.data:
+                    # Atualiza registro existente
+                    supabase.table("cadastros").update({
+                        "nome": nome_input,
+                        "posto_cargo": posto_input,
+                        "obs": obs_input
+                    }).eq("placa", placa_fmt).execute()
+                    st.success(f"Cadastro da placa {placa_fmt} atualizado com sucesso!")
+                else:
+                    # Inserção
+                    supabase.table("cadastros").insert({
+                        "placa": placa_fmt,
+                        "nome": nome_input,
+                        "posto_cargo": posto_input,
+                        "obs": obs_input
                     }).execute()
-                    st.success("Entrada registrada com sucesso!")
-                    st.rerun()
-        else:
-            st.warning("Veículo Não Cadastrado! Preencha as informações para registro avulso:")
-            with st.form("form_avulso"):
-                nome_avulso = st.text_input("Nome do Condutor")
-                posto_avulso = st.text_input("Posto/Cargo ou Documento/Empresa")
-                btn_reg_avulso = st.form_submit_button("🟢 Confirmar Entrada Avulsa")
+                    st.success(f"Veículo com placa {placa_fmt} cadastrado com sucesso!")
                 
-                if btn_reg_avulso:
-                    hora_entrada = obter_data_hora_atual()
-                    supabase.table("movimentacoes").insert({
-                        "placa": placa_busca,
-                        "nome": nome_avulso,
-                        "posto_cargo": posto_avulso,
-                        "hora_entrada": hora_entrada,
-                        "status": "Em Trânsito"
-                    }).execute()
-                    st.success("Entrada Avulsa registrada com sucesso!")
-                    st.rerun()
+                # Ação de Salvar e Registrar Entrada Imediata
+                if btn_salvar_e_entrar:
+                    # Checa duplicidade no pátio
+                    em_patios = supabase.table("movimentacoes").select("id").eq("placa", placa_fmt).eq("status", "Em Trânsito").execute()
+                    if em_patios.data:
+                        st.warning(f"Veículo {placa_fmt} cadastrado, mas já se encontra no interior do QCG!")
+                    else:
+                        hora_agora = obter_data_hora_atual()
+                        supabase.table("movimentacoes").insert({
+                            "placa": placa_fmt,
+                            "nome": nome_input,
+                            "posto_cargo": posto_input,
+                            "hora_entrada": hora_agora,
+                            "status": "Em Trânsito"
+                        }).execute()
+                        st.balloons()
+                        st.success(f"Entrada registrada para {placa_fmt} às {hora_agora}!")
+                st.rerun()
 
     st.divider()
-    st.subheader("📑 Movimentação em Tempo Real")
-    movs = supabase.table("movimentacoes").select("*").order("created_at", desc=True).limit(20).execute()
-    if movs.data:
-        st.dataframe(movs.data, use_container_width=True)
+    st.subheader("🔍 Consultar e Gerenciar Cadastros Existentes")
+    
+    busca_cad = st.text_input("Buscar Cadastro (digite placa ou parte do nome):").strip()
+    
+    # Query de busca
+    if busca_cad:
+        res_busca = supabase.table("cadastros").select("*").or_(f"placa.ilike.%{busca_cad}%,nome.ilike.%{busca_cad}%").execute()
     else:
-        st.info("Nenhuma movimentação registrada até o momento.")
+        res_busca = supabase.table("cadastros").select("*").order("created_at", desc=True).limit(20).execute()
+        
+    if res_busca.data:
+        df_cad = pd.DataFrame(res_busca.data)
+        cols_exibicao = ["placa", "posto_cargo", "nome", "obs"]
+        cols_existentes = [c for c in cols_exibicao if c in df_cad.columns]
+        
+        st.dataframe(df_cad[cols_existentes], use_container_width=True)
+        
+        # Exclusão de Cadastro
+        with st.expander("🗑️ Opção de Exclusão de Cadastro"):
+            placa_deletar = st.selectbox("Selecione a placa para excluir do cadastro:", [""] + list(df_cad["placa"].unique()))
+            if placa_deletar:
+                if st.button(f"Confirmar Exclusão de {placa_deletar}", type="secondary"):
+                    supabase.table("cadastros").delete().eq("placa", placa_deletar).execute()
+                    st.success(f"Cadastro {placa_deletar} excluído com sucesso!")
+                    st.rerun()
+    else:
+        st.info("Nenhum cadastro encontrado.")
+
 
 # -------------------------------------------------------------
-# ABA 2: CADASTRO DE VEÍCULOS E PESSOAS
+# ABA 2: REGISTRO DE ENTRADA
 # -------------------------------------------------------------
 with aba2:
-    st.header("Novo Cadastro de Veículo / Pessoa")
-    with st.form("form_novo_cadastro"):
-        placa_cad = st.text_input("Placa do Veículo").strip().upper()
-        nome_cad = st.text_input("Nome Completo")
-        posto_cad = st.text_input("Posto / Graduação / Cargo")
-        obs_cad = st.text_area("Observações (ex: Setor, Telefone, Autorização)")
-        btn_salvar_cad = st.form_submit_button("💾 Salvar Cadastro")
+    st.header("🚗 Registro de Entrada de Veículo")
+    
+    # Busca de Placa com autocomplete/sugestão simples
+    placa_digitada = st.text_input("Digite a Placa do Veículo:").strip()
+    placa_fmt_entrada = formatar_placa(placa_digitada)
+    
+    if placa_fmt_entrada:
+        st.markdown(f"**Placa Formatada:** `{placa_fmt_entrada}`")
         
-        if btn_salvar_cad:
-            if placa_cad and nome_cad:
-                supabase.table("cadastros").insert({
-                    "placa": placa_cad,
-                    "nome": nome_cad,
-                    "posto_cargo": posto_cad,
-                    "obs": obs_cad
-                }).execute()
-                st.success(f"Cadastro da placa {placa_cad} realizado com sucesso!")
+        # 1. Prevenção de Duplicidade: Verificar se o veículo já está no pátio
+        res_patio = supabase.table("movimentacoes").select("*").eq("placa", placa_fmt_entrada).eq("status", "Em Trânsito").execute()
+        
+        if res_patio.data:
+            mov_aberta = res_patio.data[0]
+            st.error(f"⚠️ **ATENÇÃO: Veículo já se encontra no interior do QCG!**")
+            st.warning(f"Entrada registrada em: **{mov_aberta.get('hora_entrada')}** por **{mov_aberta.get('nome')}** ({mov_aberta.get('posto_cargo')})")
+            st.info("Para dar saída neste veículo, acesse a **Aba 3: Acompanhamento (Pátio Interno)**.")
+        else:
+            # 2. Busca no cadastro
+            res_cad = supabase.table("cadastros").select("*").eq("placa", placa_fmt_entrada).execute()
+            
+            if res_cad.data:
+                cad = res_cad.data[0]
+                st.success("✅ Veículo Encontrado no Cadastro!")
+                
+                col_i1, col_i2 = st.columns(2)
+                with col_i1:
+                    st.write(f"**Placa:** {cad.get('placa')}")
+                    st.write(f"**Posto/Cargo:** {cad.get('posto_cargo')}")
+                with col_i2:
+                    st.write(f"**Nome:** {cad.get('nome')}")
+                    st.write(f"**Observações:** {cad.get('obs', 'Nenhuma')}")
+                    
+                if st.button("🟢 Confirmar e Registrar Entrada", type="primary", use_container_width=True):
+                    hora_entrada = obter_data_hora_atual()
+                    supabase.table("movimentacoes").insert({
+                        "placa": cad.get("placa"),
+                        "nome": cad.get("nome"),
+                        "posto_cargo": cad.get("posto_cargo"),
+                        "hora_entrada": hora_entrada,
+                        "status": "Em Trânsito"
+                    }).execute()
+                    st.success(f"Entrada de {cad.get('placa')} confirmada às {hora_entrada}!")
+                    st.rerun()
             else:
-                st.error("Por favor, preencha pelo menos a Placa e o Nome.")
+                st.warning("⚠️ Veículo Não Cadastrado no Sistema!")
+                st.write("Deseja ir para a tela de cadastro para registrar este veículo?")
+                
+                if st.button("📋 Ir para Cadastro deste Veículo", type="primary"):
+                    st.session_state.placa_redirecionada = placa_fmt_entrada
+                    st.rerun()
+
 
 # -------------------------------------------------------------
-# ABA 3: HISTÓRICO GERAL
+# ABA 3: ACOMPANHAMENTO (PÁTIO INTERNO)
 # -------------------------------------------------------------
 with aba3:
-    st.header("Histórico Completo")
-    todas_movs = supabase.table("movimentacoes").select("*").order("created_at", desc=True).execute()
-    if todas_movs.data:
-        st.dataframe(todas_movs.data, use_container_width=True)
+    st.header("🚘 Veículos no Pátio Interno do QCG")
+    
+    # Veículos atualmente estacionados (status = "Em Trânsito" ou hora_saida nula)
+    res_presentes = supabase.table("movimentacoes").select("*").eq("status", "Em Trânsito").order("created_at", desc=True).execute()
+    
+    qtd_presentes = len(res_presentes.data) if res_presentes.data else 0
+    
+    # Indicator contador de vagas / veículos
+    st.metric(label="📊 Veículos no QCG no Momento", value=f"{qtd_presentes} veículo(s)")
+    st.divider()
+    
+    if res_presentes.data:
+        df_presentes = pd.DataFrame(res_presentes.data)
+        
+        # Exibição dos Veículos com Botão de Registro de Saída
+        st.subheader("Lista de Veículos Estacionados")
+        
+        for idx, row in df_presentes.iterrows():
+            with st.container():
+                c_p1, c_p2, c_p3, c_p4, c_p5 = st.columns([1.5, 2, 2.5, 2, 2])
+                c_p1.write(f"**{row.get('placa')}**")
+                c_p2.write(f"{row.get('posto_cargo')}")
+                c_p3.write(f"{row.get('nome')}")
+                c_p4.write(f"⏱️ Entrada: {row.get('hora_entrada')}")
+                
+                # Botão com Confirmação para evitar cliques acidentais
+                with c_p5:
+                    if st.button(f"🔴 Registrar Saída", key=f"btn_saida_{row.get('id')}"):
+                        st.session_state[f"confirm_saida_{row.get('id')}"] = True
+                        
+                if st.session_state.get(f"confirm_saida_{row.get('id')}", False):
+                    st.warning(f"Confirmar saída do veículo {row.get('placa')}?")
+                    c_sim, c_nao = st.columns([1, 1])
+                    if c_sim.button("Sim, Dar Saída", key=f"sim_{row.get('id')}", type="primary"):
+                        hora_saida = obter_data_hora_atual()
+                        supabase.table("movimentacoes").update({
+                            "hora_saida": hora_saida,
+                            "status": "Concluído"
+                        }).eq("id", row.get("id")).execute()
+                        st.session_state[f"confirm_saida_{row.get('id')}"] = False
+                        st.success(f"Saída do veículo {row.get('placa')} concluída às {hora_saida}!")
+                        st.rerun()
+                    if c_nao.button("Cancelar", key=f"nao_{row.get('id')}"):
+                        st.session_state[f"confirm_saida_{row.get('id')}"] = False
+                        st.rerun()
+            st.divider()
     else:
-        st.info("Nenhum histórico encontrado.")
+        st.info("Nenhum veículo estacionado no pátio interno neste momento.")
+
+
+# -------------------------------------------------------------
+# ABA 4: HISTÓRICO / RELATÓRIOS
+# -------------------------------------------------------------
+with aba4:
+    st.header("📊 Histórico Geral e Relatórios")
+    
+    st.subheader("🔍 Filtros de Pesquisa")
+    f_col1, f_col2, f_col3 = st.columns(3)
+    
+    with f_col1:
+        filtro_placa = st.text_input("Filtrar por Placa:").strip().upper()
+    with f_col2:
+        filtro_posto = st.selectbox("Filtrar por Posto/Graduação:", ["TODOS"] + POSTOS_GRADUACOES)
+    with f_col3:
+        filtro_status = st.selectbox("Status da Movimentação:", ["TODOS", "Em Trânsito", "Concluído"])
+        
+    # Query dinamica de histórico
+    query = supabase.table("movimentacoes").select("*").order("created_at", desc=True)
+    
+    if filtro_placa:
+        query = query.ilike("placa", f"%{filtro_placa}%")
+    if filtro_posto != "TODOS":
+        query = query.eq("posto_cargo", filtro_posto)
+    if filtro_status != "TODOS":
+        query = query.eq("status", filtro_status)
+        
+    res_hist = query.execute()
+    
+    if res_hist.data:
+        df_hist = pd.DataFrame(res_hist.data)
+        
+        # Formatação para tabela limpa
+        colunas_desejadas = ["placa", "posto_cargo", "nome", "hora_entrada", "hora_saida", "status"]
+        cols_f = [c for c in colunas_desejadas if c in df_hist.columns]
+        
+        st.subheader("📋 Resultados do Histórico")
+        st.dataframe(df_hist[cols_f], use_container_width=True)
+        
+        # Exportar CSV para relatórios/impressão
+        st.divider()
+        csv_data = df_hist[cols_f].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📄 Baixar Relatório (CSV)",
+            data=csv_data,
+            file_name=f"relatorio_portaria_qcg_{obter_data_atual()}.csv",
+            mime="text/csv",
+            type="primary"
+        )
+    else:
+        st.info("Nenhum registro encontrado para os filtros selecionados.")
