@@ -1,303 +1,170 @@
-import io
-import datetime
-import pandas as pd
 import streamlit as st
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
 from supabase import create_client, Client
+from datetime import datetime
+import pytz
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Portaria QCG", page_icon="🛡️", layout="wide")
+# Configuração do Fuso Horário do Brasil
+FUSO_BR = pytz.timezone('America/Recife')
 
-# --- CONEXÃO COM O SUPABASE ---
-URL_SUPABASE = st.secrets.get("SUPABASE_URL", "")
-CHAVE_SUPABASE = st.secrets.get("SUPABASE_KEY", "")
+def obter_data_hora_atual():
+    """Retorna a data e hora formatada no fuso de Brasília/Recife (DD/MM/YYYY HH:MM:SS)"""
+    return datetime.now(FUSO_BR).strftime('%d/%m/%Y %H:%M:%S')
 
+# Configuração da página Streamlit
+st.set_page_config(
+    page_title="Controle de Acesso - Portaria QCG",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+# Conexão com o Supabase
 @st.cache_resource
-def iniciar_conexao():
-    if URL_SUPABASE and CHAVE_SUPABASE:
-        return create_client(URL_SUPABASE, CHAVE_SUPABASE)
-    return None
+def init_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
-supabase: Client = iniciar_conexao()
+supabase = init_supabase()
 
-# --- SISTEMA DE LOGIN ---
+# Autenticação de Usuários Simples
 USUARIOS = {
     "sentinela": "qcg2026",
     "admin": "coronel2026"
 }
 
-if "logado" not in st.session_state:
-    st.session_state["logado"] = False
-if "placa_prefill" not in st.session_state:
-    st.session_state["placa_prefill"] = ""
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 
-st.title("🛡️ Controle de Acesso - Portaria QCG")
-
-if not st.session_state["logado"]:
+if not st.session_state.logged_in:
+    st.title("🛡️ Controle de Acesso - Portaria QCG")
     st.subheader("Acesso ao Sistema")
+    
     usuario_input = st.text_input("Usuário")
     senha_input = st.text_input("Senha", type="password")
     
-    if st.button("Entrar", type="primary"):
+    if st.button("Entrar"):
         if usuario_input in USUARIOS and USUARIOS[usuario_input] == senha_input:
-            st.session_state["logado"] = True
-            st.session_state["usuario_atual"] = usuario_input
+            st.session_state.logged_in = True
+            st.session_state.usuario = usuario_input
             st.rerun()
         else:
             st.error("Usuário ou senha incorretos.")
     st.stop()
 
-# --- BARRA LATERAL ---
-st.sidebar.markdown(f"**Militar em serviço:** `{st.session_state['usuario_atual']}`")
-if st.sidebar.button("Sair / Trocar Turno"):
-    st.session_state["logado"] = False
-    st.rerun()
+# --- TELA PRINCIPAL DO SISTEMA ---
+st.title("🛡️ Controle de Acesso - Portaria QCG")
+st.caption(f"Usuário ativo: **{st.session_state.usuario}** | {obter_data_hora_atual()}")
 
-# --- FUNÇÕES DE BANCO DE DADOS ---
-if "veiculos_db" not in st.session_state:
-    st.session_state["veiculos_db"] = []
-if "movimentacoes_db" not in st.session_state:
-    st.session_state["movimentacoes_db"] = []
+# Abas de Funcionalidades
+aba1, aba2, aba3 = st.tabs(["🚗 Registro de Movimentação", "📋 Cadastro de Veículos/Pessoas", "📊 Histórico Geral"])
 
-def buscar_veiculo(placa):
-    placa = placa.strip().upper()
-    if supabase:
-        try:
-            res = supabase.table("cadastros_veiculos").select("*").eq("placa", placa).execute()
-            if res.data:
-                return res.data[0]
-        except Exception:
-            pass
-    for v in st.session_state["veiculos_db"]:
-        if v["placa"] == placa:
-            return v
-    return None
-
-def salvar_veiculo(placa, posto, nome, observacao):
-    dados = {
-        "placa": placa.strip().upper(),
-        "posto": posto,
-        "nome": nome,
-        "observacao": observacao
-    }
-    if supabase:
-        try:
-            supabase.table("cadastros_veiculos").upsert(dados, on_conflict="placa").execute()
-        except Exception:
-            pass
-    st.session_state["veiculos_db"] = [v for v in st.session_state["veiculos_db"] if v["placa"] != dados["placa"]]
-    st.session_state["veiculos_db"].append(dados)
-
-def registrar_entrada(placa, posto, nome, observacao):
-    hora_atual = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    dados = {
-        "placa": placa.strip().upper(),
-        "posto": posto,
-        "nome": nome,
-        "observacao": observacao,
-        "hora_entrada": hora_atual,
-        "hora_saida": "Em Patio",
-        "usuario": st.session_state["usuario_atual"]
-    }
-    if supabase:
-        try:
-            supabase.table("movimentacoes_portaria").insert(dados).execute()
-        except Exception:
-            pass
-    dados["id"] = len(st.session_state["movimentacoes_db"]) + 1
-    st.session_state["movimentacoes_db"].append(dados)
-
-def registrar_saida(registro_id, placa, hora_entrada):
-    hora_saida = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    if supabase:
-        try:
-            supabase.table("movimentacoes_portaria").update({"hora_saida": hora_saida}).eq("placa", placa).eq("hora_entrada", hora_entrada).execute()
-        except Exception:
-            pass
-    for m in st.session_state["movimentacoes_db"]:
-        if m.get("id") == registro_id or (m["placa"] == placa and m["hora_entrada"] == hora_entrada):
-            m["hora_saida"] = hora_saida
-
-def obter_movimentacoes():
-    if supabase:
-        try:
-            res = supabase.table("movimentacoes_portaria").select("*").order("id", desc=True).execute()
-            if res.data:
-                return res.data
-        except Exception:
-            pass
-    return st.session_state["movimentacoes_db"]
-
-# --- CRIAÇÃO DAS ABAS ---
-tab1, tab2, tab3 = st.tabs([
-    "📝 1. Cadastro de Veículos", 
-    "🚗 2. Controle de Portaria (Entrada/Saída)", 
-    "📄 3. Relatórios / Exportação PDF"
-])
-
-OPCOES_POSTO = ["ADVOGADO(A)", "TEN CORONEL", "CORONEL", "OUTROS"]
-
-# ==========================================
-# ABA 1: CADASTRO DE VEÍCULOS
-# ==========================================
-with tab1:
-    st.header("Cadastro de Veículos e Condutores Autorizados")
+# -------------------------------------------------------------
+# ABA 1: REGISTRO DE MOVIMENTAÇÃO (ENTRADA / SAÍDA)
+# -------------------------------------------------------------
+with aba1:
+    st.header("Entrada e Saída de Veículos")
+    placa_busca = st.text_input("Digite a Placa do Veículo:").strip().upper()
     
-    val_placa_inicial = st.session_state.get("placa_prefill", "")
-    
-    with st.form("form_cadastro_veiculo", clear_on_submit=True):
-        placa_cad = st.text_input("Placa do Veículo", value=val_placa_inicial, max_chars=8).upper()
-        posto_cad = st.selectbox("Posto / Cargo", options=OPCOES_POSTO)
-        nome_cad = st.text_input("Nome do Condutor / Autoridade")
-        obs_cad = st.text_area("Observações")
+    if placa_busca:
+        # Busca no cadastro prévio
+        res_cad = supabase.table("cadastros").select("*").eq("placa", placa_busca).execute()
         
-        marcar_entrada_junto = st.checkbox("Registrar Entrada no Estacionamento Imediatamente", value=bool(val_placa_inicial))
-        
-        btn_salvar = st.form_submit_button("Salvar Cadastro", type="primary")
-        
-        if btn_salvar:
-            if not placa_cad or not nome_cad:
-                st.warning("Preencha a Placa e o Nome do Condutor.")
-            else:
-                salvar_veiculo(placa_cad, posto_cad, nome_cad, obs_cad)
-                if marcar_entrada_junto:
-                    registrar_entrada(placa_cad, posto_cad, nome_cad, obs_cad)
-                    st.success(f"Veículo {placa_cad} cadastrado e ENTRADA registrada com sucesso!")
-                else:
-                    st.success(f"Veículo {placa_cad} cadastrado com sucesso!")
-                st.session_state["placa_prefill"] = ""
-
-# ==========================================
-# ABA 2: CONTROLE DE PORTARIA
-# ==========================================
-with tab2:
-    st.header("Controle de Entrada e Saída em Tempo Real")
-    
-    col_busca, col_vazio = st.columns([2, 1])
-    
-    with col_busca:
-        placa_pesquisa = st.text_input("Digite a Placa do Veículo para Pesquisar/Registrar:", max_chars=8).strip().upper()
-        
-        if placa_pesquisa:
-            dados_veiculo = buscar_veiculo(placa_pesquisa)
+        if res_cad.data:
+            dados = res_cad.data[0]
+            st.success("Veículo Encontrado no Cadastro!")
+            st.write(f"**Placa:** {dados.get('placa')}")
+            st.write(f"**Posto/Cargo:** {dados.get('posto_cargo', 'N/I')}")
+            st.write(f"**Nome:** {dados.get('nome', 'N/I')}")
+            st.write(f"**Obs:** {dados.get('obs', 'Sem observações')}")
             
-            if dados_veiculo:
-                st.success("✅ Veículo Encontrado no Cadastro!")
-                st.write(f"**Placa:** {dados_veiculo['placa']}")
-                st.write(f"**Posto/Cargo:** {dados_veiculo['posto']}")
-                st.write(f"**Nome:** {dados_veiculo['nome']}")
-                st.write(f"**Obs:** {dados_veiculo.get('observacao', '')}")
+            # Verificar se há entrada em aberto sem saída
+            res_mov = supabase.table("movimentacoes")\
+                .select("*")\
+                .eq("placa", placa_busca)\
+                .eq("status", "Em Trânsito")\
+                .execute()
                 
-                if st.button("🔴 Confirmar Entrada do Veículo", type="primary"):
-                    registrar_entrada(
-                        dados_veiculo['placa'], 
-                        dados_veiculo['posto'], 
-                        dados_veiculo['nome'], 
-                        dados_veiculo.get('observacao', '')
-                    )
+            if res_mov.data:
+                mov_aberta = res_mov.data[0]
+                st.warning(f"Veículo com entrada em aberto desde: {mov_aberta.get('hora_entrada')}")
+                if st.button("🔴 Confirmar Saída do Veículo", type="primary"):
+                    hora_saida = obter_data_hora_atual()
+                    supabase.table("movimentacoes").update({
+                        "hora_saida": hora_saida,
+                        "status": "Concluído"
+                    }).eq("id", mov_aberta["id"]).execute()
+                    st.success("Saída registrada com sucesso!")
+                    st.rerun()
+            else:
+                if st.button("🟢 Confirmar Entrada do Veículo", type="primary"):
+                    hora_entrada = obter_data_hora_atual()
+                    supabase.table("movimentacoes").insert({
+                        "placa": placa_busca,
+                        "nome": dados.get("nome"),
+                        "posto_cargo": dados.get("posto_cargo"),
+                        "hora_entrada": hora_entrada,
+                        "status": "Em Trânsito"
+                    }).execute()
                     st.success("Entrada registrada com sucesso!")
                     st.rerun()
-            else:
-                st.error("❌ Veículo NÃO CADASTRADO")
-                if st.button("➕ Cadastrar Este Veículo Agora"):
-                    st.session_state["placa_prefill"] = placa_pesquisa
-                    st.info("Vá para a Aba '1. Cadastro de Veículos' para concluir o registro.")
-    
-    st.divider()
-    st.subheader("📋 Veículos Registrados / Movimentação em Tempo Real")
-    
-    movimentacoes = obter_movimentacoes()
-    
-    if movimentacoes:
-        for idx, mov in enumerate(reversed(movimentacoes)):
-            c1, c2, c3, c4, c5, c6 = st.columns([1.5, 1.5, 2, 2, 2, 1.5])
-            c1.write(f"**{mov['placa']}**")
-            c2.write(mov['posto'])
-            c3.write(mov['nome'])
-            c4.write(f"Entrada: {mov['hora_entrada']}")
-            c5.write(f"Saída: {mov['hora_saida']}")
-            
-            if mov['hora_saida'] == "Em Patio":
-                if c6.button("🔴 Saída", key=f"saida_{idx}"):
-                    registrar_saida(mov.get("id"), mov['placa'], mov['hora_entrada'])
+        else:
+            st.warning("Veículo Não Cadastrado! Preencha as informações para registro avulso:")
+            with st.form("form_avulso"):
+                nome_avulso = st.text_input("Nome do Condutor")
+                posto_avulso = st.text_input("Posto/Cargo ou Documento/Empresa")
+                btn_reg_avulso = st.form_submit_button("🟢 Confirmar Entrada Avulsa")
+                
+                if btn_reg_avulso:
+                    hora_entrada = obter_data_hora_atual()
+                    supabase.table("movimentacoes").insert({
+                        "placa": placa_busca,
+                        "nome": nome_avulso,
+                        "posto_cargo": posto_avulso,
+                        "hora_entrada": hora_entrada,
+                        "status": "Em Trânsito"
+                    }).execute()
+                    st.success("Entrada Avulsa registrada com sucesso!")
                     st.rerun()
-            else:
-                c6.write("✅ Concluído")
-            st.divider()
+
+    st.divider()
+    st.subheader("📑 Movimentação em Tempo Real")
+    movs = supabase.table("movimentacoes").select("*").order("created_at", desc=True).limit(20).execute()
+    if movs.data:
+        st.dataframe(movs.data, use_container_width=True)
     else:
         st.info("Nenhuma movimentação registrada até o momento.")
 
-# ==========================================
-# ABA 3: RELATÓRIOS E EXPORTAÇÃO PDF
-# ==========================================
-with tab3:
-    st.header("Relatório de Movimentação de Veículos")
-    
-    movs = obter_movimentacoes()
-    
-    if movs:
-        df = pd.DataFrame(movs)
-        cols_exibir = ["placa", "posto", "nome", "hora_entrada", "hora_saida", "observacao"]
-        df_exibir = df[[c for c in cols_exibir if c in df.columns]]
+# -------------------------------------------------------------
+# ABA 2: CADASTRO DE VEÍCULOS E PESSOAS
+# -------------------------------------------------------------
+with aba2:
+    st.header("Novo Cadastro de Veículo / Pessoa")
+    with st.form("form_novo_cadastro"):
+        placa_cad = st.text_input("Placa do Veículo").strip().upper()
+        nome_cad = st.text_input("Nome Completo")
+        posto_cad = st.text_input("Posto / Graduação / Cargo")
+        obs_cad = st.text_area("Observações (ex: Setor, Telefone, Autorização)")
+        btn_salvar_cad = st.form_submit_button("💾 Salvar Cadastro")
         
-        st.dataframe(df_exibir, use_container_width=True)
-        
-        def gerar_pdf(dados_movimentacao):
-            buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-            elements = []
-            
-            styles = getSampleStyleSheet()
-            titulo_style = ParagraphStyle(
-                'Titulo',
-                parent=styles['Heading1'],
-                fontSize=14,
-                alignment=1,
-                spaceAfter=15
-            )
-            
-            elements.append(Paragraph("<b>POLÍCIA MILITAR DE PERNAMBUCO</b>", titulo_style))
-            elements.append(Paragraph("<b>QUARTEL COMANDO GERAL - RELATÓRIO DE PORTARIA</b>", titulo_style))
-            elements.append(Spacer(1, 10))
-            
-            data_tabela = [["Placa", "Posto/Cargo", "Nome", "Entrada", "Saída", "Obs"]]
-            for m in dados_movimentacao:
-                data_tabela.append([
-                    m.get("placa", ""),
-                    m.get("posto", ""),
-                    m.get("nome", ""),
-                    m.get("hora_entrada", ""),
-                    m.get("hora_saida", ""),
-                    m.get("observacao", "")
-                ])
-                
-            tabela = Table(data_tabela, colWidths=[60, 75, 105, 105, 105, 100])
-            tabela.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ]))
-            
-            elements.append(tabela)
-            doc.build(elements)
-            buffer.seek(0)
-            return buffer
+        if btn_salvar_cad:
+            if placa_cad and nome_cad:
+                supabase.table("cadastros").insert({
+                    "placa": placa_cad,
+                    "nome": nome_cad,
+                    "posto_cargo": posto_cad,
+                    "obs": obs_cad
+                }).execute()
+                st.success(f"Cadastro da placa {placa_cad} realizado com sucesso!")
+            else:
+                st.error("Por favor, preencha pelo menos a Placa e o Nome.")
 
-        pdf_bytes = gerar_pdf(movs)
-        
-        st.download_button(
-            label="📥 Baixar Relatório em PDF",
-            data=pdf_bytes,
-            file_name=f"relatorio_portaria_qcg_{datetime.date.today()}.pdf",
-            mime="application/pdf",
-            type="primary"
-        )
+# -------------------------------------------------------------
+# ABA 3: HISTÓRICO GERAL
+# -------------------------------------------------------------
+with aba3:
+    st.header("Histórico Completo")
+    todas_movs = supabase.table("movimentacoes").select("*").order("created_at", desc=True).execute()
+    if todas_movs.data:
+        st.dataframe(todas_movs.data, use_container_width=True)
     else:
-        st.info("Não há dados registrados para gerar o relatório em PDF.")
+        st.info("Nenhum histórico encontrado.")
