@@ -6,7 +6,7 @@ import pandas as pd
 from io import BytesIO
 
 # Importações para geração de PDF
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
@@ -17,15 +17,12 @@ from reportlab.lib import colors
 FUSO_BR = pytz.timezone('America/Recife')
 
 def obter_data_hora_atual():
-    """Retorna data e hora formatadas no fuso oficial de Brasília/Recife (DD/MM/YYYY HH:MM:SS)"""
     return datetime.now(FUSO_BR).strftime('%d/%m/%Y %H:%M:%S')
 
 def obter_data_atual():
-    """Retorna a data atual no formato YYYY-MM-DD para filtros"""
     return datetime.now(FUSO_BR).strftime('%Y-%m-%d')
 
 def formatar_placa(placa_raw: str) -> str:
-    """Converte para maiúsculas e remove hifens/espaços (ex: abc-1234 vira ABC1234)"""
     if not placa_raw:
         return ""
     return placa_raw.strip().upper().replace("-", "").replace(" ", "")
@@ -91,9 +88,8 @@ POSTOS_GRADUACOES = [
     "OUTROS"
 ]
 
-# State para redirecionamento com preenchimento automático da placa
-if "placa_redirecionada" not in st.session_state:
-    st.session_state.placa_redirecionada = ""
+if "abrir_cadastro_rapido" not in st.session_state:
+    st.session_state.abrir_cadastro_rapido = False
 
 # Cabeçalho Principal
 st.title("🛡️ Controle de Acesso - Portaria QCG")
@@ -112,16 +108,11 @@ aba1, aba2, aba3, aba4 = st.tabs([
 # -------------------------------------------------------------
 with aba1:
     st.header("📋 Cadastro de Veículos Autorizados")
-    
-    placa_inicial = st.session_state.placa_redirecionada
-    if placa_inicial:
-        st.info(f"Preenchendo cadastro para a placa direcionada: **{placa_inicial}**")
-        st.session_state.placa_redirecionada = "" # Limpa após usar
 
     with st.form("form_cadastro_veiculo"):
         c1, c2 = st.columns([1, 2])
         with c1:
-            placa_input = st.text_input("Placa do Veículo", value=placa_inicial, help="Formatada automaticamente (ex: ABC1234)").strip()
+            placa_input = st.text_input("Placa do Veículo", help="Formatada automaticamente (ex: ABC1234)").strip()
             posto_input = st.selectbox("Posto / Cargo (Apenas Autorizados)", POSTOS_GRADUACOES)
         with c2:
             nome_input = st.text_input("Nome Completo do Condutor")
@@ -138,7 +129,6 @@ with aba1:
             if not placa_fmt or not nome_input:
                 st.error("Por favor, preencha pelo menos a Placa e o Nome Completo.")
             else:
-                # Verifica se a placa já existe
                 existe = supabase.table("cadastros").select("id").eq("placa", placa_fmt).execute()
                 if existe.data:
                     supabase.table("cadastros").update({
@@ -202,7 +192,7 @@ with aba1:
 
 
 # -------------------------------------------------------------
-# ABA 2: REGISTRO DE ENTRADA
+# ABA 2: REGISTRO DE ENTRADA (COM CADASTRO RÁPIDO EMBUTIDO)
 # -------------------------------------------------------------
 with aba2:
     st.header("🚗 Registro de Entrada de Veículo")
@@ -248,11 +238,44 @@ with aba2:
                     st.rerun()
             else:
                 st.warning("⚠️ Veículo Não Cadastrado no Sistema!")
-                st.write("Deseja ir para a tela de cadastro para registrar este veículo?")
                 
-                if st.button("📋 Ir para Cadastro deste Veículo", type="primary"):
-                    st.session_state.placa_redirecionada = placa_fmt_entrada
-                    st.rerun()
+                # Exibe Formulário Rápido de Cadastro e Entrada na própria tela
+                st.subheader(f"📝 Preencher Cadastro Rápido para {placa_fmt_entrada}")
+                with st.form("form_cadastro_rapido_entrada"):
+                    col_r1, col_r2 = st.columns([1, 2])
+                    with col_r1:
+                        posto_rapido = st.selectbox("Posto / Cargo", POSTOS_GRADUACOES)
+                    with col_r2:
+                        nome_rapido = st.text_input("Nome Completo do Condutor")
+                    
+                    obs_rapido = st.text_input("Observação (opcional)")
+                    btn_cad_e_entrar = st.form_submit_button("🟢 Salvar e Confirmar Entrada Agora", type="primary")
+                    
+                    if btn_cad_e_entrar:
+                        if not nome_rapido:
+                            st.error("Por favor, preencha o Nome Completo.")
+                        else:
+                            # 1. Salva no cadastro
+                            supabase.table("cadastros").insert({
+                                "placa": placa_fmt_entrada,
+                                "nome": nome_rapido,
+                                "posto_cargo": posto_rapido,
+                                "obs": obs_rapido
+                            }).execute()
+                            
+                            # 2. Registra a entrada
+                            hora_entrada = obter_data_hora_atual()
+                            supabase.table("movimentacoes").insert({
+                                "placa": placa_fmt_entrada,
+                                "nome": nome_rapido,
+                                "posto_cargo": posto_rapido,
+                                "hora_entrada": hora_entrada,
+                                "status": "Em Trânsito"
+                            }).execute()
+                            
+                            st.balloons()
+                            st.success(f"Cadastro e Entrada do veículo {placa_fmt_entrada} realizados com sucesso!")
+                            st.rerun()
 
 
 # -------------------------------------------------------------
@@ -325,7 +348,7 @@ def gerar_relatorio_pdf(df_dados, usuario_emissao):
         parent=styles['Heading1'],
         fontSize=14,
         leading=16,
-        alignment=1, # Centralizado
+        alignment=1,
         textColor=colors.HexColor("#1A2B4C"),
         fontName="Helvetica-Bold"
     )
@@ -359,7 +382,6 @@ def gerar_relatorio_pdf(df_dados, usuario_emissao):
 
     story = []
     
-    # Cabeçalho Oficial
     story.append(Paragraph("POLÍCIA MILITAR DE PERNAMBUCO", title_style))
     story.append(Paragraph("QUARTEL GENERAL DA POLÍCIA MILITAR - QCG", subtitle_style))
     story.append(Paragraph("RELATÓRIO OFICIAL DE CONTROLE DE ACESSO E MOVIMENTAÇÃO DE VEÍCULOS", ParagraphStyle('Sub', parent=subtitle_style, fontName="Helvetica-Bold", fontSize=11)))
@@ -367,13 +389,11 @@ def gerar_relatorio_pdf(df_dados, usuario_emissao):
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1A2B4C")))
     story.append(Spacer(1, 10))
     
-    # Informações de Emissão
     data_emissao = obter_data_hora_atual()
     info_text = f"<b>Data/Hora de Emissão:</b> {data_emissao} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Responsável/Sentinela:</b> {usuario_emissao} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Total de Registros:</b> {len(df_dados)}"
     story.append(Paragraph(info_text, ParagraphStyle('Info', parent=styles['Normal'], fontSize=9)))
     story.append(Spacer(1, 15))
     
-    # Montagem da Tabela
     headers = ["Placa", "Posto / Cargo", "Nome do Condutor", "Hora Entrada", "Hora Saída", "Status"]
     table_data = [[Paragraph(h, cell_header_style) for h in headers]]
     
@@ -408,7 +428,6 @@ def gerar_relatorio_pdf(df_dados, usuario_emissao):
     story.append(tabela)
     story.append(Spacer(1, 30))
     
-    # Campo de Assinatura
     story.append(Paragraph("____________________________________________________", ParagraphStyle('Line', parent=subtitle_style, alignment=1)))
     story.append(Paragraph(f"<b>Sentinela de Serviço: {usuario_emissao}</b>", ParagraphStyle('Sign', parent=subtitle_style, alignment=1)))
     story.append(Paragraph("Portaria Principal - QCG/PMPE", ParagraphStyle('SubSign', parent=subtitle_style, alignment=1, fontSize=8)))
