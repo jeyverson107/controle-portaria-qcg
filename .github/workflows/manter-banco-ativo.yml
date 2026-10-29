@@ -1,0 +1,25 @@
+# Roda todo dia às 07:05 (horário de Recife), de graça, no próprio GitHub.
+# 1) Dá a saída automática dos veículos do serviço que terminou às 07:00,
+#    mesmo que ninguém abra o app.
+# 2) Mantém o banco do Supabase "acordado" (o plano gratuito pausa após ~7 dias sem uso).
+# Precisa de dois Secrets no GitHub: SUPABASE_URL e SUPABASE_KEY.
+name: Manter banco ativo e fechar serviço
+
+on:
+  schedule:
+    - cron: "5 10 * * *"   # 10:05 UTC = 07:05 em Recife
+  workflow_dispatch: {}     # permite rodar manualmente pelo botão "Run workflow"
+
+jobs:
+  fechar-servico:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fechar serviço vencido e manter o banco ativo
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          curl -sS --fail -X POST "$SUPABASE_URL/rest/v1/rpc/fechar_servicos_vencidos" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Content-Type: application/json" -d '{}'
+          echo " <- veículos com saída automática"
