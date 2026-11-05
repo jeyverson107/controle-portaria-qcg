@@ -1,3 +1,4 @@
+import os
 import re
 import streamlit as st
 from supabase import create_client, Client
@@ -85,7 +86,7 @@ def mostrar_avisos():
 # -------------------------------------------------------------
 st.set_page_config(
     page_title="Controle de Acesso - Portaria QCG",
-    page_icon="🛡️",
+    page_icon=os.path.join(os.path.dirname(os.path.abspath(__file__)), "icone.png"),
     layout="wide"
 )
 
