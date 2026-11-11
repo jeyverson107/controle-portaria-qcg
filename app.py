@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 import pandas as pd
 from io import BytesIO
+from xml.sax.saxutils import escape
 
 # Importações para geração de PDF
 from reportlab.lib.pagesizes import A4
@@ -204,6 +205,18 @@ def registrar_entrada(placa, nome, posto, permanente=False, obs_permanencia=""):
     return hora
 
 
+def obs_por_placa(placas) -> dict:
+    """Busca as observações do cadastro (reserva, atividade, telefone etc.) de cada placa."""
+    placas = sorted({p for p in placas if p})
+    if not placas:
+        return {}
+    try:
+        res = supabase.table("cadastros").select("placa,obs").in_("placa", placas).execute()
+        return {r["placa"]: (r.get("obs") or "").strip() for r in (res.data or [])}
+    except Exception:
+        return {}
+
+
 qtd_auto = fechar_servicos_vencidos()
 if qtd_auto:
     avisar(f"🕖 {qtd_auto} veículo(s) do serviço anterior receberam saída automática (fim do serviço às 07:00).", "info")
@@ -345,7 +358,25 @@ with aba1:
         cols_exibicao = ["placa", "posto_cargo", "nome", "obs"]
         cols_existentes = [c for c in cols_exibicao if c in df_cad.columns]
 
-        st.dataframe(df_cad[cols_existentes], width='stretch', hide_index=True)
+        st.dataframe(
+            df_cad[cols_existentes].rename(columns={
+                "placa": "Placa", "posto_cargo": "Posto/Cargo", "nome": "Nome", "obs": "Observações",
+            }),
+            width='stretch', hide_index=True,
+        )
+
+        # Ficha completa: mostra a observação inteira (telefone, reserva, atividade etc.)
+        opcoes_ficha = [""] + [f"{r['placa']} — {r.get('nome') or ''}" for r in res_busca.data]
+        ficha_sel = st.selectbox("📇 Ver ficha completa do veículo:", opcoes_ficha)
+        if ficha_sel:
+            placa_ficha = ficha_sel.split(" — ")[0]
+            cad_ficha = next((r for r in res_busca.data if r["placa"] == placa_ficha), None)
+            if cad_ficha:
+                with st.container(border=True):
+                    st.write(f"**Placa:** {cad_ficha.get('placa')}")
+                    st.write(f"**Posto/Cargo:** {cad_ficha.get('posto_cargo')}")
+                    st.write(f"**Nome:** {cad_ficha.get('nome')}")
+                    st.write(f"**Observações:** {cad_ficha.get('obs') or 'Nenhuma'}")
 
         with st.expander("🗑️ Opção de Exclusão de Cadastro"):
             placa_deletar = st.selectbox("Selecione a placa para excluir do cadastro:", [""] + list(df_cad["placa"].unique()))
@@ -376,6 +407,9 @@ with aba2:
             mov_aberta = res_patio.data[0]
             st.error("⚠️ **ATENÇÃO: Veículo já se encontra no interior do QCG!**")
             st.warning(f"Entrada registrada em: **{mov_aberta.get('hora_entrada')}** por **{mov_aberta.get('nome')}** ({mov_aberta.get('posto_cargo')})")
+            obs_aberta = obs_por_placa([placa_fmt_entrada]).get(placa_fmt_entrada)
+            if obs_aberta:
+                st.info(f"📝 **Observações:** {obs_aberta}")
             st.info("Para dar saída neste veículo, acesse a **Aba 3: Acompanhamento (Pátio Interno)**.")
         else:
             res_cad = supabase.table("cadastros").select("*").eq("placa", placa_fmt_entrada).execute()
@@ -441,7 +475,7 @@ with aba2:
 # -------------------------------------------------------------
 # ABA 3: ACOMPANHAMENTO (PÁTIO INTERNO)
 # -------------------------------------------------------------
-def linha_veiculo(row):
+def linha_veiculo(row, obs_cadastro=""):
     mov_id = row.get("id")
     permanente = bool(row.get("permanente"))
     with st.container(border=True):
@@ -450,6 +484,8 @@ def linha_veiculo(row):
         c_p2.write(f"{row.get('posto_cargo')}")
         c_p3.write(f"{row.get('nome')}")
         c_p4.write(f"⏱️ Entrada: {row.get('hora_entrada')}")
+        if obs_cadastro:
+            st.info(f"📝 **Observações:** {obs_cadastro}")
 
         if permanente:
             if row.get("obs_permanencia"):
@@ -502,6 +538,7 @@ with aba3:
 
     res_presentes = supabase.table("movimentacoes").select("*").eq("status", STATUS_PATIO).order("created_at", desc=True).execute()
     presentes = res_presentes.data or []
+    obs_patio = obs_por_placa(r.get("placa") for r in presentes)
     permanentes = [r for r in presentes if r.get("permanente")]
     do_servico = [r for r in presentes if not r.get("permanente")]
 
@@ -523,7 +560,7 @@ with aba3:
         st.subheader(f"🕖 Veículos deste serviço ({len(do_servico)})")
         if do_servico:
             for row in do_servico:
-                linha_veiculo(row)
+                linha_veiculo(row, obs_patio.get(row.get("placa"), ""))
         else:
             st.caption("Nenhum.")
 
@@ -531,7 +568,7 @@ with aba3:
         if permanentes:
             st.caption("Estes veículos NÃO recebem saída automática. Confira-os a cada serviço.")
             for row in permanentes:
-                linha_veiculo(row)
+                linha_veiculo(row, obs_patio.get(row.get("placa"), ""))
         else:
             st.caption("Nenhum.")
 
@@ -605,20 +642,27 @@ def gerar_relatorio_pdf(df_dados, usuario_emissao, periodo_descricao=""):
     story.append(Paragraph(info_text, ParagraphStyle('Info', parent=styles['Normal'], fontSize=9, leading=13)))
     story.append(Spacer(1, 15))
 
-    headers = ["Placa", "Posto / Cargo", "Nome do Condutor", "Hora Entrada", "Hora Saída", "Situação"]
+    headers = ["Placa", "Posto / Cargo", "Nome do Condutor", "Hora Entrada", "Hora Saída", "Situação", "Observações"]
     table_data = [[Paragraph(h, cell_header_style) for h in headers]]
+
+    def txt(valor, padrao=''):
+        # Evita "nan"/"None" no PDF quando o campo está vazio
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)) or str(valor).strip() == '':
+            return padrao
+        return escape(str(valor))
 
     for _, row in df_dados.iterrows():
         table_data.append([
-            Paragraph(str(row.get('placa', '') or ''), cell_style),
-            Paragraph(str(row.get('posto_cargo', '') or ''), cell_style),
-            Paragraph(str(row.get('nome', '') or ''), cell_style),
-            Paragraph(str(row.get('hora_entrada', '') or '-'), cell_style),
-            Paragraph(str(row.get('hora_saida', '') or 'Em Trânsito'), cell_style),
-            Paragraph(str(row.get('situacao', '') or row.get('status', '')), cell_style)
+            Paragraph(txt(row.get('placa')), cell_style),
+            Paragraph(txt(row.get('posto_cargo')), cell_style),
+            Paragraph(txt(row.get('nome')), cell_style),
+            Paragraph(txt(row.get('hora_entrada'), '-'), cell_style),
+            Paragraph(txt(row.get('hora_saida'), 'Em Trânsito'), cell_style),
+            Paragraph(txt(row.get('situacao')) or txt(row.get('status')), cell_style),
+            Paragraph(txt(row.get('obs')), cell_style)
         ])
 
-    tabela = Table(table_data, colWidths=[60, 85, 140, 90, 90, 75])
+    tabela = Table(table_data, colWidths=[52, 62, 105, 68, 68, 62, 118])
     tabela.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1A2B4C")),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
@@ -704,7 +748,9 @@ with aba4:
     if res_hist.data:
         df_hist = pd.DataFrame(res_hist.data)
         df_hist["situacao"] = df_hist.apply(descrever_situacao, axis=1)
-        colunas_desejadas = ["placa", "posto_cargo", "nome", "hora_entrada", "hora_saida", "situacao"]
+        obs_hist = obs_por_placa(df_hist["placa"].tolist())
+        df_hist["obs"] = df_hist["placa"].map(lambda p: obs_hist.get(p, ""))
+        colunas_desejadas = ["placa", "posto_cargo", "nome", "hora_entrada", "hora_saida", "situacao", "obs"]
         cols_f = [c for c in colunas_desejadas if c in df_hist.columns]
 
         st.subheader(f"📋 Resultados da Consulta ({len(df_hist)})")
@@ -712,6 +758,7 @@ with aba4:
             df_hist[cols_f].rename(columns={
                 "placa": "Placa", "posto_cargo": "Posto/Cargo", "nome": "Nome",
                 "hora_entrada": "Entrada", "hora_saida": "Saída", "situacao": "Situação",
+                "obs": "Observações",
             }),
             width='stretch', hide_index=True,
         )
